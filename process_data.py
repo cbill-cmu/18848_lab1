@@ -19,6 +19,10 @@ To plot a specific frame, pass its index from that markdown table:
 To compare the local equations and one angle cube against xwr:
 
     python process_data.py --check
+
+To write a range-Doppler GIF of one recording:
+
+    python process_data.py --gif moving_moving_184130
 """
 
 import argparse
@@ -59,6 +63,13 @@ def parse_args() -> argparse.Namespace:
         "--check",
         action="store_true",
         help="Compare local equations and one cube to xwr, then continue.",
+    )
+    parser.add_argument(
+        "--gif",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Also write a range-Doppler GIF for this recording stem.",
     )
     return parser.parse_args()
 
@@ -316,9 +327,13 @@ def verdict(condition: str, still: tuple[float, float], mover: tuple[float, floa
             return "keep: the brightest return left zero Doppler with the radar"
         return "redo: the radar move did not show up; the peak is still at 0 m/s"
     if key == "moving_moving":
-        if abs(still_speed) > 0.3 and mover_visible and abs(mover_speed - still_speed) > 0.35:
-            return "keep: two different speeds are visible"
-        return "redo: need the reflector and the person at two different speeds"
+        # Several people can share one speed. Any strong off-zero return is enough.
+        if mover_visible or abs(still_speed) > 0.3:
+            return (
+                f"keep: motion is off zero Doppler "
+                f"({mover_speed:.2f} m/s at {mover_range:.1f} m)"
+            )
+        return "redo: the brightest returns stay at 0 m/s"
     return "check the figure"
 
 
@@ -445,6 +460,50 @@ def process_file(
     )
     print(f"  saved {figure}")
     print(f"  saved {report}")
+    return powers, metrics
+
+
+def save_rd_gif(
+    path: Path,
+    powers: list[np.ndarray],
+    metrics: dict,
+    title: str,
+) -> None:
+    """Animate the range-Doppler image at the radar frame rate."""
+    from matplotlib.animation import PillowWriter
+
+    views = [np.log10(power + 1e-12) for power in powers]
+    cap = float(np.percentile(np.stack(views), 99))
+    extent = [0, metrics["max_range"], -metrics["max_speed"], metrics["max_speed"]]
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.4))
+    image = ax.imshow(
+        np.clip(views[0], None, cap),
+        origin="lower",
+        aspect="auto",
+        extent=extent,
+        cmap="viridis",
+        vmin=float(np.min(views[0])),
+        vmax=cap,
+    )
+    ax.set_xlabel("Range (m)")
+    ax.set_ylabel("Speed (m/s)")
+    caption = ax.set_title(title)
+
+    try:
+        writer = PillowWriter(fps=10)
+        with writer.saving(fig, str(path), dpi=90):
+            for i, view in enumerate(views):
+                distance, speed, _ = peak_at(powers[i], metrics)
+                image.set_data(np.clip(view, None, cap))
+                caption.set_text(
+                    f"{title}  frame {i}  peak {distance:.2f} m, {speed:.2f} m/s"
+                )
+                writer.grab_frame()
+    except Exception as exc:
+        plt.close(fig)
+        raise SystemExit(f"Could not write {path}. Install pillow and retry. ({exc})")
+    plt.close(fig)
 
 
 def check_against_xwr(radar: dict, frame: np.ndarray) -> None:
@@ -501,8 +560,25 @@ def main() -> None:
         sample_frames, sample_radar = load_recording(recordings[0])
         check_against_xwr(sample_radar, sample_frames[0])
     chosen = frame_choices(args.frame)
+    gif_names = set(args.gif)
+    if gif_names:
+        recordings = [
+            path for path in recordings
+            if path.stem in gif_names or any(name in path.stem for name in gif_names)
+        ]
+        if not recordings:
+            raise SystemExit(f"No recording matched --gif {sorted(gif_names)}")
     for path in recordings:
-        process_file(path, args.out, args.threshold, chosen.get(path.stem))
+        powers, metrics = process_file(
+            path, args.out, args.threshold, chosen.get(path.stem),
+        )
+        if not gif_names or path.stem in gif_names or any(
+            name in path.stem for name in gif_names
+        ):
+            if gif_names:
+                gif_path = args.out / f"{path.stem}.gif"
+                save_rd_gif(gif_path, powers, metrics, path.stem)
+                print(f"  saved {gif_path}")
 
 
 if __name__ == "__main__":

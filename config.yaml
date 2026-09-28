@@ -2,13 +2,13 @@ radar:
   device: AWR1843
   port: null
   frequency: 76.0
-  idle_time: 110.1
-  adc_start_time: 6.0
-  ramp_end_time: 48.0
+  idle_time: 98.7
+  adc_start_time: 5.7
+  ramp_end_time: 59.0
   tx_start_time: 1.0
-  freq_slope: 99.0
+  freq_slope: 78.125
   adc_samples: 128
-  sample_rate: 3168
+  sample_rate: 2500
   frame_length: 128
   frame_period: 100.0
 capture:

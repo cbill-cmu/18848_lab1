@@ -14,7 +14,11 @@ CFAR points. Frames are not averaged.
 
 To plot a specific frame, pass its index from that markdown table:
 
-    python process_data.py --frame static_moving=20 --frame moving_static=15
+    python process_data.py --frame static_moving=20
+
+To compare the local equations and one angle cube against xwr:
+
+    python process_data.py --check
 """
 
 import argparse
@@ -26,7 +30,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
-from xwr.rsp import iq_from_iiqq
+from xwr.rsp import iq_from_iiqq  # byte order only; the FFTs below are local
 
 ROOT = Path(__file__).resolve().parent
 C = 299792458.0
@@ -50,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         default=[],
         metavar="NAME=INDEX",
         help="Plot this frame instead of the automatic choice. Repeatable.",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Compare local equations and one cube to xwr, then continue.",
     )
     return parser.parse_args()
 
@@ -438,12 +447,59 @@ def process_file(
     print(f"  saved {report}")
 
 
+def check_against_xwr(radar: dict, frame: np.ndarray) -> None:
+    """Oracle check. Not used to make the figures."""
+    import xwr
+
+    cfg = xwr.XWRConfig(
+        device="AWR1843",
+        frequency=float(radar["frequency"]),
+        idle_time=float(radar["idle_time"]),
+        adc_start_time=float(radar["adc_start_time"]),
+        ramp_end_time=float(radar["ramp_end_time"]),
+        tx_start_time=float(radar["tx_start_time"]),
+        freq_slope=float(radar["freq_slope"]),
+        adc_samples=int(radar["adc_samples"]),
+        sample_rate=int(radar["sample_rate"]),
+        frame_length=int(radar["frame_length"]),
+        frame_period=float(radar["frame_period"]),
+    )
+    local = chirp_metrics(radar)
+    print("Equation check against xwr.XWRConfig")
+    for name, ours, theirs in (
+        ("range resolution (m)", local["range_res"], cfg.range_resolution),
+        ("max range (m)", local["max_range"], cfg.max_range),
+        ("speed resolution (m/s)", local["speed_res"], cfg.doppler_resolution),
+        ("max speed (m/s)", local["max_speed"], cfg.max_doppler),
+    ):
+        rel = abs(ours - theirs) / max(abs(theirs), 1e-12)
+        print(f"  {name}: local {ours:.6g}, xwr {theirs:.6g}, relative {rel:.2e}")
+
+    from xwr.rsp import numpy as xwr_numpy
+
+    iq = iq_from_iiqq(frame)
+    local_cube = angle_spectrum(range_doppler(iq))
+    reference = xwr_numpy.AWR1843AOP(
+        window=False, size={"azimuth": ANGLE_BINS, "elevation": ANGLE_BINS},
+    )
+    xwr_cube = np.asarray(reference(np.asarray(frame)[None, ...]))[0]
+    diff = float(np.max(np.abs(local_cube - xwr_cube)))
+    peak = float(np.max(np.abs(xwr_cube)))
+    print(
+        f"Angle-cube check against AWR1843AOP: "
+        f"max abs diff {diff:.3e}, peak {peak:.3e}, relative {diff / peak:.3e}"
+    )
+
+
 def main() -> None:
     args = parse_args()
     recordings = sorted(args.data.glob("*.npz"))
     if not recordings:
         raise SystemExit(f"No recordings in {args.data}")
     args.out.mkdir(exist_ok=True)
+    if args.check:
+        sample_frames, sample_radar = load_recording(recordings[0])
+        check_against_xwr(sample_radar, sample_frames[0])
     chosen = frame_choices(args.frame)
     for path in recordings:
         process_file(path, args.out, args.threshold, chosen.get(path.stem))

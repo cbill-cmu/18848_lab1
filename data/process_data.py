@@ -107,10 +107,14 @@ def ca_cfar(
     radius = guard + train
     guard_slice = slice(train, train + 2 * guard + 1)
     n_train = (2 * radius + 1) ** 2 - (2 * guard + 1) ** 2
+    # The training ring has to sit fully on the range axis. Doppler wraps.
+    start = max(min_range, radius)
+    stop = n_range - start
     for doppler in range(n_doppler):
         d_index = (np.arange(doppler - radius, doppler + radius + 1)) % n_doppler
-        for rng in range(min_range, n_range - min_range):
-            window = power[np.ix_(d_index, np.arange(rng - radius, rng + radius + 1))]
+        for rng in range(start, stop):
+            r_index = np.arange(rng - radius, rng + radius + 1)
+            window = power[np.ix_(d_index, r_index)]
             train_cells = window.copy()
             train_cells[guard_slice, guard_slice] = 0
             noise = train_cells.sum() / n_train

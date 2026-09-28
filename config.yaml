@@ -1,0 +1,17 @@
+radar:
+  device: AWR1843
+  port: null
+  frequency: 76.8
+  idle_time: 108.0
+  adc_start_time: 6.0
+  ramp_end_time: 48.0
+  tx_start_time: 1.0
+  freq_slope: 100.0
+  adc_samples: 128
+  sample_rate: 3200
+  frame_length: 128
+  frame_period: 100.0
+capture:
+  sys_ip: 192.168.33.30
+  fpga_ip: 192.168.33.180
+  socket_buffer: 6291456

@@ -8,8 +8,13 @@ Run on the machine that has the recordings:
 
     python process_data.py
 
-Figures are written to figures/. The printed check says whether a scene
-should be recorded again.
+Figures are written to figures/. Each recording also gets a figures/<name>.md
+file with the chirp scale, the chosen frame, every frame's peak, and the
+CFAR points. Frames are not averaged.
+
+To plot a specific frame, pass its index from that markdown table:
+
+    python process_data.py --frame static_moving=20 --frame moving_static=15
 """
 
 import argparse
@@ -39,7 +44,24 @@ def parse_args() -> argparse.Namespace:
         default=8.0,
         help="CA-CFAR threshold as a linear power ratio.",
     )
+    parser.add_argument(
+        "--frame",
+        action="append",
+        default=[],
+        metavar="NAME=INDEX",
+        help="Plot this frame instead of the automatic choice. Repeatable.",
+    )
     return parser.parse_args()
+
+
+def frame_choices(items: list[str]) -> dict[str, int]:
+    chosen: dict[str, int] = {}
+    for item in items:
+        if "=" not in item:
+            raise SystemExit(f"--frame must look like static_moving=20, not {item!r}")
+        name, raw = item.split("=", 1)
+        chosen[name] = int(raw)
+    return chosen
 
 
 def load_recording(path: Path) -> tuple[np.ndarray, dict]:
@@ -291,7 +313,75 @@ def verdict(condition: str, still: tuple[float, float], mover: tuple[float, floa
     return "check the figure"
 
 
-def process_file(path: Path, out_dir: Path, threshold: float) -> None:
+def write_results(
+    path: Path,
+    recording: Path,
+    n_frames: int,
+    raw_shape: tuple[int, ...],
+    metrics: dict,
+    index: int,
+    powers: list[np.ndarray],
+    cloud: np.ndarray,
+    still: tuple[float, float],
+    mover: tuple[float, float, float],
+    noise: float,
+    note: str,
+) -> None:
+    """One Markdown file of the numbers behind a scene's figure."""
+    lines = [
+        f"# {recording.stem}",
+        "",
+        f"Plotted frame **{index}** of {n_frames}. Frames are not averaged.",
+        f"Raw shape `{raw_shape}`.",
+        "",
+        f"Check: {note}",
+        "",
+        "| Quantity | Value |",
+        "| --- | --- |",
+        f"| Range resolution | {metrics['range_res'] * 100:.2f} cm |",
+        f"| Maximum range | {metrics['max_range']:.2f} m |",
+        f"| Speed resolution | {metrics['speed_res']:.4f} m/s |",
+        f"| Maximum speed | {metrics['max_speed']:.2f} m/s |",
+        f"| Strongest peak | {still[0]:.2f} m at {still[1]:.2f} m/s |",
+        f"| Off-zero peak | {mover[0]:.2f} m at {mover[1]:.2f} m/s |",
+        f"| Median power | {noise:.3e} |",
+        f"| CFAR points | {len(cloud)} |",
+        "",
+        "## Every frame",
+        "",
+        "The plotted frame is marked. `peak` is the brightest cell. "
+        "`off-zero` is the brightest cell at least 0.3 m/s away from zero speed.",
+        "",
+        "| Frame | Peak range (m) | Peak speed (m/s) | Off-zero range (m) | Off-zero speed (m/s) |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for i, power in enumerate(powers):
+        peak_range, peak_speed, _ = peak_at(power, metrics)
+        off_range, off_speed, _ = moving_peak(power, metrics)
+        mark = " ← plotted" if i == index else ""
+        lines.append(
+            f"| {i}{mark} | {peak_range:.2f} | {peak_speed:.2f} | "
+            f"{off_range:.2f} | {off_speed:.2f} |"
+        )
+    lines.extend([
+        "",
+        "## CFAR points in the plotted frame",
+        "",
+        "| Forward (m) | Lateral (m) | Up (m) | Speed (m/s) |",
+        "| --- | --- | --- | --- |",
+    ])
+    if len(cloud) == 0:
+        lines.append("| — | — | — | — |")
+    for point in cloud:
+        lines.append(
+            f"| {point[0]:.2f} | {point[1]:.2f} | {point[2]:.2f} | {point[3]:.2f} |"
+        )
+    path.write_text("\n".join(lines) + "\n")
+
+
+def process_file(
+    path: Path, out_dir: Path, threshold: float, chosen: int | None
+) -> None:
     frames, radar = load_recording(path)
     metrics = chirp_metrics(radar)
     print(f"\n{path.name}: {len(frames)} frames, raw shape {frames.shape}")
@@ -310,7 +400,12 @@ def process_file(path: Path, out_dir: Path, threshold: float) -> None:
         powers.append(np.sum(np.abs(rd) ** 2, axis=(1, 2)))
 
     condition = path.stem
-    index = choose_frame(powers, metrics, condition)
+    if chosen is None:
+        index = choose_frame(powers, metrics, condition)
+    elif not 0 <= chosen < len(powers):
+        raise SystemExit(f"{condition}: frame {chosen} is outside 0..{len(powers) - 1}")
+    else:
+        index = chosen
     power = powers[index]
     ang = angle_spectrum(cubes[index])
     detections = local_peaks(ca_cfar(power, threshold=threshold), power)
@@ -319,12 +414,18 @@ def process_file(path: Path, out_dir: Path, threshold: float) -> None:
     still = peak_at(power, metrics)[:2]
     mover = moving_peak(power, metrics)
     noise = float(np.median(power[:, 8:]))
+    note = verdict(condition, still, mover, noise)
     print(f"  frame {index}: strongest peak {still[0]:.2f} m at {still[1]:.2f} m/s")
     print(f"  off-zero peak {mover[0]:.2f} m at {mover[1]:.2f} m/s")
     print(f"  CFAR points {len(cloud)}")
-    print(f"  {verdict(condition, still, mover, noise)}")
+    print(f"  {note}")
 
     figure = out_dir / f"{condition}.png"
+    report = out_dir / f"{condition}.md"
+    write_results(
+        report, path, len(frames), frames.shape, metrics, index,
+        powers, cloud, still, mover, noise, note,
+    )
     save_figure(
         figure,
         power,
@@ -334,6 +435,7 @@ def process_file(path: Path, out_dir: Path, threshold: float) -> None:
         f"{condition}  frame {index}  peak {still[0]:.2f} m, {still[1]:.2f} m/s",
     )
     print(f"  saved {figure}")
+    print(f"  saved {report}")
 
 
 def main() -> None:
@@ -342,8 +444,9 @@ def main() -> None:
     if not recordings:
         raise SystemExit(f"No recordings in {args.data}")
     args.out.mkdir(exist_ok=True)
+    chosen = frame_choices(args.frame)
     for path in recordings:
-        process_file(path, args.out, args.threshold)
+        process_file(path, args.out, args.threshold, chosen.get(path.stem))
 
 
 if __name__ == "__main__":
